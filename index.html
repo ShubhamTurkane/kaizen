@@ -332,7 +332,48 @@ const STOR={
         localStorage.setItem(key,JSON.stringify(val));
       }
     }catch(e){console.warn('Storage set failed',e);}
+  },
+  async remove(key){
+    try{
+      if(this._useNative){
+        await window.storage.set(key,JSON.stringify(null));
+      }else{
+        localStorage.removeItem(key);
+      }
+    }catch(e){console.warn('Storage remove failed',e);}
   }
+};
+
+const ACTIVE_DRAFT_KEY='kz-active-workout';
+const ACTIVE_DRAFT_TTL=18*60*60*1000;
+
+const fmtNum=(v)=>{
+  if(v==null||v==='')return '';
+  const n=parseFloat(v);
+  if(!Number.isFinite(n))return String(v);
+  return Number.isInteger(n)?String(n):String(n).replace(/\.?0+$/,'');
+};
+
+const buildNextGoalsFromWorkout=(workout)=>{
+  if(!workout?.exercises)return [];
+  const goals=[];
+  workout.exercises.forEach(ex=>{
+    ex.sets?.forEach((set,idx)=>{
+      if(!set.completed)return;
+      const reps=parseInt(set.reps,10);
+      if(!Number.isFinite(reps)||reps<=0)return;
+      goals.push({
+        exerciseId:ex.id,
+        exerciseName:ex.name,
+        muscle:ex.muscle,
+        setNo:idx+1,
+        weight:fmtNum(set.weight),
+        previousReps:reps,
+        targetReps:reps+1
+      });
+    });
+  });
+  return goals;
 };
 
 // ─── THEME ────────────────────────────────────────────────────────────────────
@@ -392,6 +433,8 @@ function StatCard({label,val,icon}){
 function HomeView({streak,totalWorkouts,totalVolume,lastWorkout,routines,onStartWorkout}){
   const date=new Date().toLocaleDateString('en-IN',{weekday:'long',month:'long',day:'numeric'});
   const vol=totalVolume>=1000?`${(totalVolume/1000).toFixed(1)}t`:`${Math.round(totalVolume)}kg`;
+  const nextGoals=lastWorkout?.nextGoals?.length?lastWorkout.nextGoals:buildNextGoalsFromWorkout(lastWorkout);
+  const nextRoutine=routines.find(r=>r.id===lastWorkout?.routineId);
 
   return React.createElement('div',{className:'fade-up',style:{padding:'24px 16px 110px'}},
     React.createElement('div',{style:{marginBottom:28}},
@@ -404,6 +447,22 @@ function HomeView({streak,totalWorkouts,totalVolume,lastWorkout,routines,onStart
       React.createElement(StatCard,{label:'Streak',val:streak+'d'}),
       React.createElement(StatCard,{label:'Sessions',val:totalWorkouts}),
       React.createElement(StatCard,{label:'Volume',val:vol})
+    ),
+    nextGoals.length>0&&React.createElement('div',{style:{marginBottom:28,background:`linear-gradient(135deg,${T.greenDim},${T.accentDim})`,border:`1px solid rgba(0,229,255,0.25)`,borderRadius:18,padding:16,boxShadow:'0 18px 45px rgba(0,0,0,0.16)'}},
+      React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:14,marginBottom:12}},
+        React.createElement('div',null,
+          React.createElement('p',{style:{fontSize:11,color:T.green,fontWeight:900,letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:5}},'Next Session Goal'),
+          React.createElement('h3',{style:{fontSize:18,lineHeight:1.2,fontWeight:900,fontFamily:"'Inter',sans-serif"}},'Add 1 clean rep')
+        ),
+        nextRoutine&&React.createElement('button',{onClick:()=>onStartWorkout(nextRoutine),style:{background:T.green,color:T.bg,border:'none',borderRadius:10,padding:'9px 12px',fontSize:12,fontWeight:900,cursor:'pointer',fontFamily:"'Inter',sans-serif",whiteSpace:'nowrap'}},'Start')
+      ),
+      React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:8}},
+        nextGoals.slice(0,3).map((g,i)=>React.createElement('div',{key:g.exerciseId+'-'+g.setNo+'-'+i,style:{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center',background:'rgba(18,14,46,0.36)',border:`1px solid ${T.border}`,borderRadius:10,padding:'9px 10px'}},
+          React.createElement('span',{style:{fontSize:12,color:T.text,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},g.exerciseName+' set '+g.setNo),
+          React.createElement('span',{style:{fontSize:12,color:T.green,fontWeight:900,whiteSpace:'nowrap'}},(g.weight?g.weight+'kg x ':'')+g.targetReps)
+        )),
+        nextGoals.length>3&&React.createElement('div',{style:{fontSize:11,color:T.muted,fontWeight:700,textAlign:'center'}},'+'+(nextGoals.length-3)+' more targets waiting')
+      )
     ),
     lastWorkout&&React.createElement('div',{style:{marginBottom:28}},
       React.createElement('p',{style:{fontSize:11,color:T.muted,fontWeight:700,letterSpacing:'0.07em',textTransform:'uppercase',marginBottom:10}},'Last Session'),
@@ -536,6 +595,7 @@ function ActiveWorkoutView({wo,timer,prs,onUpdateSet,onToggleSet,onAddSet,onRemo
   const done=wo.exercises.reduce((s,ex)=>s+ex.sets.filter(s=>s.completed).length,0);
   const total=wo.exercises.reduce((s,ex)=>s+ex.sets.length,0);
   const pct=total>0?Math.round(done/total*100):0;
+  const finishDisabled=done===0;
 
   return React.createElement('div',{style:{background:T.bg,minHeight:'100vh',paddingBottom:30}},
     React.createElement('div',{style:{background:T.surf,borderBottom:`1px solid ${T.border}`,padding:'14px 16px',position:'sticky',top:0,zIndex:50,backdropFilter:'blur(16px)'}},
@@ -545,32 +605,42 @@ function ActiveWorkoutView({wo,timer,prs,onUpdateSet,onToggleSet,onAddSet,onRemo
           React.createElement('div',{style:{fontSize:11,fontWeight:700,color:T.muted,textTransform:'uppercase',letterSpacing:'0.06em'}},wo.routineName),
           React.createElement('div',{style:{fontSize:30,fontWeight:900,color:T.accent,fontFamily:"'Inter',sans-serif",letterSpacing:'-0.04em',lineHeight:1.1}},timer)
         ),
-        React.createElement('button',{onClick:onFinish,style:{background:T.grad2,border:'none',color:'#fff',borderRadius:10,padding:'8px 14px',fontSize:12,fontWeight:800,cursor:'pointer',boxShadow:`0 10px 24px ${T.accentGlow}`}},'Finish ✓')
+        React.createElement('button',{disabled:finishDisabled,onClick:finishDisabled?undefined:onFinish,style:{background:T.grad2,border:'none',color:'#fff',borderRadius:10,padding:'8px 14px',fontSize:12,fontWeight:800,cursor:finishDisabled?'not-allowed':'pointer',boxShadow:`0 10px 24px ${T.accentGlow}`,opacity:finishDisabled?0.55:1}},'Finish ✓')
       ),
       React.createElement('div',{style:{background:T.surf2,borderRadius:4,height:5,overflow:'hidden'}},
         React.createElement('div',{style:{background:`linear-gradient(90deg,${T.accent},${T.green})`,height:'100%',width:pct+'%',transition:'width 0.4s cubic-bezier(0.16,1,0.3,1)',borderRadius:4}})
       ),
-      React.createElement('div',{style:{textAlign:'center',fontSize:11,color:T.muted,marginTop:5,fontWeight:600}},done+'/'+total+' sets · '+pct+'%')
+      React.createElement('div',{style:{textAlign:'center',fontSize:11,color:T.muted,marginTop:5,fontWeight:600}},done+'/'+total+' sets · '+pct+'% · Auto-saved')
     ),
     React.createElement('div',{style:{padding:'14px 16px',display:'flex',flexDirection:'column',gap:16}},
       wo.exercises.map((ex,exIdx)=>{
         const pr=prs[ex.id];
+        const hasGoal=ex.sets.some(s=>s.goalReps);
         return React.createElement('div',{key:ex.id,style:{background:T.surf,borderRadius:18,overflow:'hidden',border:`1px solid ${T.border}`}},
           React.createElement('div',{style:{padding:'13px 16px 11px',borderBottom:`1px solid ${T.border}`,display:'flex',justifyContent:'space-between',alignItems:'center',background:T.surf2}},
             React.createElement('div',null,
               React.createElement('span',{style:{fontWeight:700,fontSize:15,fontFamily:"'Inter',sans-serif"}},ex.name),
               React.createElement('span',{style:{fontSize:11,color:MC[ex.muscle]||T.muted,marginLeft:8,fontWeight:700}},ex.muscle)
             ),
-            pr&&React.createElement('span',{style:{fontSize:11,color:T.gold,fontWeight:700,background:T.goldDim,padding:'3px 8px',borderRadius:6}},'PR '+pr.weight+'kg')
+            React.createElement('div',{style:{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}},
+              hasGoal&&React.createElement('span',{style:{fontSize:10,color:T.green,fontWeight:900,background:T.greenDim,padding:'3px 7px',borderRadius:6,border:`1px solid rgba(0,229,255,0.22)`}},'+1 rep goal'),
+              pr&&React.createElement('span',{style:{fontSize:11,color:T.gold,fontWeight:700,background:T.goldDim,padding:'3px 8px',borderRadius:6}},'PR '+pr.weight+'kg')
+            )
           ),
           React.createElement('div',{style:{padding:'12px 14px'}},
             React.createElement('div',{style:{display:'grid',gridTemplateColumns:'26px 1fr 1fr 42px',gap:6,marginBottom:6}},
               ['#','KG','REPS',''].map((h,i)=>React.createElement('div',{key:i,style:{fontSize:10,fontWeight:700,color:T.muted2,letterSpacing:'0.07em',textAlign:'center'}},h))
             ),
-            ex.sets.map((set,si)=>React.createElement('div',{key:si,style:{display:'grid',gridTemplateColumns:'26px 1fr 1fr 42px',gap:6,marginBottom:6,opacity:set.completed?0.6:1,transition:'opacity 0.2s'}},
+            ex.sets.map((set,si)=>React.createElement('div',{key:si,style:{display:'grid',gridTemplateColumns:'26px 1fr 1fr 42px',gap:6,marginBottom:8,opacity:set.completed?0.6:1,transition:'opacity 0.2s',alignItems:'start'}},
               React.createElement('div',{style:{fontSize:12,fontWeight:700,color:T.muted2,display:'flex',alignItems:'center',justifyContent:'center',height:40}},si+1),
-              React.createElement('input',{type:'number',inputMode:'decimal',value:set.weight,onChange:e=>onUpdateSet(exIdx,si,'weight',e.target.value),placeholder:set.prevWeight||'—',style:{background:set.completed?T.greenDim:T.surf3,border:`1px solid ${set.completed?'rgba(0,229,255,0.45)':T.border2}`,color:T.text,borderRadius:10,padding:'0 8px',fontSize:15,fontWeight:700,height:40,textAlign:'center',outline:'none',width:'100%',fontVariantNumeric:'tabular-nums',transition:'all 0.15s',fontFamily:"'Inter',sans-serif"}}),
-              React.createElement('input',{type:'number',inputMode:'numeric',value:set.reps,onChange:e=>onUpdateSet(exIdx,si,'reps',e.target.value),placeholder:set.prevReps||'—',style:{background:set.completed?T.greenDim:T.surf3,border:`1px solid ${set.completed?'rgba(0,229,255,0.45)':T.border2}`,color:T.text,borderRadius:10,padding:'0 8px',fontSize:15,fontWeight:700,height:40,textAlign:'center',outline:'none',width:'100%',fontVariantNumeric:'tabular-nums',transition:'all 0.15s',fontFamily:"'Inter',sans-serif"}}),
+              React.createElement('div',null,
+                React.createElement('input',{type:'number',inputMode:'decimal',value:set.weight,onChange:e=>onUpdateSet(exIdx,si,'weight',e.target.value),placeholder:set.prevWeight||'—',style:{background:set.completed?T.greenDim:T.surf3,border:`1px solid ${set.completed?'rgba(0,229,255,0.45)':T.border2}`,color:T.text,borderRadius:10,padding:'0 8px',fontSize:15,fontWeight:700,height:40,textAlign:'center',outline:'none',width:'100%',fontVariantNumeric:'tabular-nums',transition:'all 0.15s',fontFamily:"'Inter',sans-serif"}}),
+                set.goalWeight&&React.createElement('div',{style:{fontSize:9,color:T.green,textAlign:'center',fontWeight:800,marginTop:3,letterSpacing:'0.03em'}},'Goal '+set.goalWeight+'kg')
+              ),
+              React.createElement('div',null,
+                React.createElement('input',{type:'number',inputMode:'numeric',value:set.reps,onChange:e=>onUpdateSet(exIdx,si,'reps',e.target.value),placeholder:set.prevReps||'—',style:{background:set.completed?T.greenDim:T.surf3,border:`1px solid ${set.completed?'rgba(0,229,255,0.45)':T.border2}`,color:T.text,borderRadius:10,padding:'0 8px',fontSize:15,fontWeight:700,height:40,textAlign:'center',outline:'none',width:'100%',fontVariantNumeric:'tabular-nums',transition:'all 0.15s',fontFamily:"'Inter',sans-serif"}}),
+                set.goalReps&&React.createElement('div',{style:{fontSize:9,color:T.green,textAlign:'center',fontWeight:800,marginTop:3,letterSpacing:'0.03em'}},'Goal '+set.goalReps)
+              ),
               React.createElement('button',{onClick:()=>onToggleSet(exIdx,si),style:{background:set.completed?T.green:T.surf3,border:`1px solid ${set.completed?T.green:T.border2}`,color:set.completed?T.bg:T.muted2,borderRadius:10,cursor:'pointer',height:40,width:42,fontSize:15,display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.15s',fontWeight:700}},set.completed?'✓':'○')
             )),
             React.createElement('div',{style:{display:'flex',gap:8,marginTop:8}},
@@ -590,6 +660,7 @@ function WorkoutCompleteView({workout,aiMsg,aiLoading,onDone}){
   const vol=Math.round(workout.exercises.reduce((s,ex)=>s+ex.sets.filter(s=>s.completed).reduce((ss,set)=>ss+((parseFloat(set.weight)||0)*(parseFloat(set.reps)||0)),0),0));
   const volStr=vol>=1000?`${(vol/1000).toFixed(1)}t`:vol+'kg';
   const motivation=pickMotivation(workout.id);
+  const nextGoals=workout.nextGoals?.length?workout.nextGoals:buildNextGoalsFromWorkout(workout);
 
   return React.createElement('div',{className:'fade-up',style:{background:T.bg,minHeight:'100vh',padding:'60px 20px 40px',maxWidth:480,margin:'0 auto'}},
     React.createElement('div',{style:{textAlign:'center',marginBottom:36}},
@@ -611,6 +682,16 @@ function WorkoutCompleteView({workout,aiMsg,aiLoading,onDone}){
       workout.prsBroken.map((pr,i)=>React.createElement('p',{key:i,style:{color:T.gold,fontSize:14,marginBottom:i<workout.prsBroken.length-1?5:0,fontWeight:600}},
         pr.name+': ',React.createElement('strong',null,pr.weight+'kg'),pr.prev?' (was '+pr.prev+'kg)':' (first time!)'
       ))
+    ),
+    nextGoals.length>0&&React.createElement('div',{style:{background:T.greenDim,border:`1px solid rgba(0,229,255,0.28)`,borderRadius:16,padding:'16px',marginBottom:20}},
+      React.createElement('p',{style:{color:T.green,fontSize:11,fontWeight:900,letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:10}},'Next Session Goals'),
+      React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:7}},
+        nextGoals.slice(0,5).map((g,i)=>React.createElement('div',{key:g.exerciseId+'-'+g.setNo+'-'+i,style:{display:'flex',justifyContent:'space-between',gap:10,fontSize:13,color:T.text,fontWeight:700}},
+          React.createElement('span',{style:{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},g.exerciseName+' set '+g.setNo),
+          React.createElement('span',{style:{color:T.green,whiteSpace:'nowrap'}},(g.weight?g.weight+'kg x ':'')+g.targetReps)
+        )),
+        nextGoals.length>5&&React.createElement('div',{style:{fontSize:11,color:T.muted,textAlign:'center',fontWeight:700}},'+'+(nextGoals.length-5)+' more +1 rep targets')
+      )
     ),
     React.createElement('div',{style:{background:T.surf,borderRadius:18,padding:'20px',marginBottom:28,border:`1px solid ${T.border}`}},
       React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:14}},
@@ -695,15 +776,16 @@ function App(){
   const [editingR,setEditingR]=useState(null);
   const [histDetail,setHistDetail]=useState(null);
   const [loaded,setLoaded]=useState(false);
-  const [saving,setSaving]=useState(false);
+  const activeDraftSave=useRef(null);
 
   // ── Load from persistent storage on mount ───────────────────────────────────
   useEffect(()=>{
     (async()=>{
-      const [r,h,p,oldR,oldH,oldP]=await Promise.all([
+      const [r,h,p,draft,oldR,oldH,oldP]=await Promise.all([
         STOR.get('kz-routines',null),
         STOR.get('kz-hist',null),
         STOR.get('kz-prs',null),
+        STOR.get(ACTIVE_DRAFT_KEY,null),
         STOR.get('gl-routines',DEF),
         STOR.get('gl-hist',[]),
         STOR.get('gl-prs',{}),
@@ -711,20 +793,39 @@ function App(){
       setRoutines(mergeDefaultRoutines(r==null?oldR:r));
       setHist(h==null?oldH:h);
       setPrs(p==null?oldP:p);
+      if(draft?.activeWO&&draft?.startTime&&Date.now()-(draft.savedAt||draft.startTime)<ACTIVE_DRAFT_TTL){
+        const elapsed=Math.max(0,Math.floor((Date.now()-draft.startTime)/1000));
+        setActiveWO(draft.activeWO);
+        setStartTime(draft.startTime);
+        setTimer(String(Math.floor(elapsed/60)).padStart(2,'0')+':'+String(elapsed%60).padStart(2,'0'));
+        setView('active');
+      }
       setLoaded(true);
     })();
   },[]);
 
-  // ── Save to persistent storage on change (debounced) ──────────────────────
-  const saveTimeout=useRef(null);
-  const debounceSave=useCallback((key,val)=>{
-    clearTimeout(saveTimeout.current);
-    saveTimeout.current=setTimeout(()=>STOR.set(key,val),500);
-  },[]);
-
+  // ── Save app data and active workout draft ────────────────────────────────
   useEffect(()=>{if(loaded)STOR.set('kz-routines',routines);},[routines,loaded]);
   useEffect(()=>{if(loaded)STOR.set('kz-hist',hist);},[hist,loaded]);
   useEffect(()=>{if(loaded)STOR.set('kz-prs',prs);},[prs,loaded]);
+
+  const clearActiveDraft=useCallback(()=>{
+    clearTimeout(activeDraftSave.current);
+    STOR.remove(ACTIVE_DRAFT_KEY);
+  },[]);
+
+  useEffect(()=>{
+    if(!loaded)return;
+    clearTimeout(activeDraftSave.current);
+    if(activeWO&&startTime){
+      activeDraftSave.current=setTimeout(()=>{
+        STOR.set(ACTIVE_DRAFT_KEY,{activeWO,startTime,savedAt:Date.now()});
+      },120);
+    }else{
+      STOR.remove(ACTIVE_DRAFT_KEY);
+    }
+    return()=>clearTimeout(activeDraftSave.current);
+  },[activeWO,startTime,loaded]);
 
   useEffect(()=>{
     if(!startTime)return;
@@ -755,18 +856,33 @@ function App(){
         const lastEx=hist.flatMap(w=>w.exercises).find(e=>e.id===ex.id&&e.sets?.some(s=>s.completed));
         const lastSets=(lastEx?.sets||[]).filter(s=>s.completed);
         return{id:ex.id,name:ex.name,muscle:ex.muscle,
-          sets:Array(Math.max(3,lastSets.length)).fill(null).map((_,i)=>({reps:'',weight:'',completed:false,prevReps:lastSets[i]?.reps||'',prevWeight:lastSets[i]?.weight||''}))};
+          sets:Array(Math.max(3,lastSets.length)).fill(null).map((_,i)=>{
+            const prev=lastSets[i];
+            const prevReps=parseInt(prev?.reps,10);
+            return {
+              reps:'',
+              weight:'',
+              completed:false,
+              prevReps:prev?.reps||'',
+              prevWeight:prev?.weight||'',
+              goalReps:Number.isFinite(prevReps)&&prevReps>0?String(prevReps+1):'',
+              goalWeight:prev?.weight?fmtNum(prev.weight):''
+            };
+          })};
       })
     };
     setActiveWO(wo);setStartTime(Date.now());setTimer('00:00');setView('active');
   };
 
-  const updateSet=(ei,si,f,v)=>setActiveWO(p=>({...p,exercises:p.exercises.map((ex,i)=>i!==ei?ex:{...ex,sets:ex.sets.map((s,j)=>j!==si?s:{...s,[f]:v})})}));
-  const toggleSet=(ei,si)=>setActiveWO(p=>({...p,exercises:p.exercises.map((ex,i)=>i!==ei?ex:{...ex,sets:ex.sets.map((s,j)=>j!==si?s:{...s,completed:!s.completed})})}));
-  const addSet=(ei)=>setActiveWO(p=>({...p,exercises:p.exercises.map((ex,i)=>{if(i!==ei)return ex;const l=ex.sets[ex.sets.length-1];return{...ex,sets:[...ex.sets,{reps:'',weight:l?.weight||'',completed:false,prevReps:'',prevWeight:''}]};})}));
-  const removeSet=(ei,si)=>setActiveWO(p=>({...p,exercises:p.exercises.map((ex,i)=>{if(i!==ei||ex.sets.length<=1)return ex;return{...ex,sets:ex.sets.filter((_,j)=>j!==si)};})}));
+  const updateSet=(ei,si,f,v)=>setActiveWO(p=>p?({...p,exercises:p.exercises.map((ex,i)=>i!==ei?ex:{...ex,sets:ex.sets.map((s,j)=>j!==si?s:{...s,[f]:v})})}):p);
+  const toggleSet=(ei,si)=>setActiveWO(p=>p?({...p,exercises:p.exercises.map((ex,i)=>i!==ei?ex:{...ex,sets:ex.sets.map((s,j)=>j!==si?s:{...s,completed:!s.completed})})}):p);
+  const addSet=(ei)=>setActiveWO(p=>p?({...p,exercises:p.exercises.map((ex,i)=>{if(i!==ei)return ex;const l=ex.sets[ex.sets.length-1];return{...ex,sets:[...ex.sets,{reps:'',weight:l?.weight||'',completed:false,prevReps:'',prevWeight:'',goalReps:'',goalWeight:''}]};})}):p);
+  const removeSet=(ei,si)=>setActiveWO(p=>p?({...p,exercises:p.exercises.map((ex,i)=>{if(i!==ei||ex.sets.length<=1)return ex;return{...ex,sets:ex.sets.filter((_,j)=>j!==si)};})}):p);
 
   const finishWorkout=async()=>{
+    if(!activeWO)return;
+    const completedSets=activeWO.exercises.reduce((s,ex)=>s+ex.sets.filter(set=>set.completed).length,0);
+    if(completedSets===0)return;
     const dur=Math.max(1,Math.round((Date.now()-startTime)/60000));
     const newPrs={...prs};const prsBroken=[];
     activeWO.exercises.forEach(ex=>{
@@ -781,9 +897,11 @@ function App(){
       }
     });
     setPrs(newPrs);
-    const workout={id:Date.now().toString(),date:new Date().toISOString(),routineId:activeWO.routineId,routineName:activeWO.routineName,duration:dur,exercises:activeWO.exercises,prsBroken};
+    const nextGoals=buildNextGoalsFromWorkout({exercises:activeWO.exercises});
+    const workout={id:Date.now().toString(),date:new Date().toISOString(),routineId:activeWO.routineId,routineName:activeWO.routineName,duration:dur,exercises:activeWO.exercises,prsBroken,nextGoals};
     const newHist=[workout,...hist];
     setHist(newHist);
+    clearActiveDraft();
     setCompletedWO(workout);setActiveWO(null);setStartTime(null);setView('complete');
     const done=activeWO.exercises.reduce((s,ex)=>s+ex.sets.filter(s=>s.completed).length,0);
     const vol=Math.round(activeWO.exercises.reduce((s,ex)=>s+ex.sets.filter(s=>s.completed).reduce((ss,s)=>ss+((parseFloat(s.weight)||0)*(parseFloat(s.reps)||0)),0),0));
@@ -792,6 +910,15 @@ function App(){
     const prLine=prsBroken.length?' You broke '+prsBroken.length+' PR'+(prsBroken.length>1?'s':'')+'.':'';
     setAiLoading(false);
     setAiMsg(`Logged ${done} working sets, ${volStr} total volume, and ${dur} minutes of focused work.${top?' Top lift marks: '+top+'.':''}${prLine} Next session, beat one number with clean form.`);
+  };
+
+  const cancelWorkout=()=>{
+    if(window.confirm('Cancel workout? Progress will be lost.')){
+      clearActiveDraft();
+      setActiveWO(null);
+      setStartTime(null);
+      setView('home');
+    }
   };
 
   const saveRoutine=(r)=>{
@@ -819,7 +946,7 @@ function App(){
   const fullScreen=['active','complete','edit-routine'].includes(view);
 
   return React.createElement('div',{style:{background:T.bg,minHeight:'100vh',color:T.text,fontFamily:"'Inter',sans-serif",maxWidth:480,margin:'0 auto',position:'relative'}},
-    view==='active'&&activeWO&&React.createElement(ActiveWorkoutView,{wo:activeWO,timer,prs,onUpdateSet:updateSet,onToggleSet:toggleSet,onAddSet:addSet,onRemoveSet:removeSet,onFinish:finishWorkout,onCancel:()=>{if(window.confirm('Cancel workout? Progress will be lost.')){setActiveWO(null);setStartTime(null);setView('home');}}}),
+    view==='active'&&activeWO&&React.createElement(ActiveWorkoutView,{wo:activeWO,timer,prs,onUpdateSet:updateSet,onToggleSet:toggleSet,onAddSet:addSet,onRemoveSet:removeSet,onFinish:finishWorkout,onCancel:cancelWorkout}),
     view==='complete'&&completedWO&&React.createElement(WorkoutCompleteView,{workout:completedWO,aiMsg,aiLoading,onDone:()=>{setCompletedWO(null);setView('home');}}),
     view==='edit-routine'&&editingR&&React.createElement(EditRoutineView,{routine:editingR,setRoutine:setEditingR,onSave:saveRoutine,onBack:()=>{setEditingR(null);setView('routines');}}),
     !fullScreen&&React.createElement(Fragment,null,
