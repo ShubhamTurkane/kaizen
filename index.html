@@ -201,8 +201,14 @@ const STORE_KEY = "kaizen_state_v2";
 let STATE = loadState();
 
 function loadState(){
-  try{const raw = localStorage.getItem(STORE_KEY); if(raw) return JSON.parse(raw);}catch(e){}
-  return {routines: defaultRoutines(), history: {}, customExercises: [], session: null, setupDone: true};
+  try{
+    const raw = localStorage.getItem(STORE_KEY);
+    if(raw){
+      const parsed = JSON.parse(raw);
+      return normalizeLoadedState(parsed);
+    }
+  }catch(e){}
+  return normalizeLoadedState({routines: defaultRoutines(), history: {}, customExercises: [], session: null, setupDone: true});
 }
 function saveState(){localStorage.setItem(STORE_KEY, JSON.stringify(STATE));}
 
@@ -217,6 +223,90 @@ function defaultRoutines(){
 }
 
 function uid(){return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4);}
+
+function clampNumber(value, min, max, fallback){
+  let n = Number(value);
+  if(Number.isNaN(n)) n = fallback;
+  if(min !== undefined && n < min) n = min;
+  if(max !== undefined && n > max) n = max;
+  return n;
+}
+
+function makeSetRow(template = {}, fallbackReps = 8){
+  const reps = template.reps === null || template.reps === undefined || template.reps === ''
+    ? fallbackReps
+    : clampNumber(template.reps, 1, 100, fallbackReps);
+  const weight = template.weight === null || template.weight === undefined || template.weight === ''
+    ? null
+    : clampNumber(template.weight, 0, 10000, 0);
+  return { reps, weight };
+}
+
+function normalizeExercise(ex){
+  const sets = Math.max(1, parseInt(ex?.sets, 10) || 1);
+  const repMin = Math.max(1, parseInt(ex?.repMin, 10) || 1);
+  const repMax = Math.max(repMin, parseInt(ex?.repMax, 10) || repMin);
+  let setPlan = Array.isArray(ex?.setPlan) ? ex.setPlan.map((row)=>makeSetRow(row, repMin)) : [];
+  if(setPlan.length === 0){
+    setPlan = Array.from({length: sets}, ()=>({reps: repMin, weight: null}));
+  }
+  while(setPlan.length < sets) setPlan.push({reps: repMin, weight: null});
+  if(setPlan.length > sets) setPlan = setPlan.slice(0, sets);
+  return {
+    name: ex?.name || 'Exercise',
+    cat: ex?.cat || 'Other',
+    custom: !!ex?.custom,
+    sets,
+    repMin,
+    repMax,
+    linkNext: !!ex?.linkNext,
+    setPlan
+  };
+}
+
+function normalizeLoadedState(state){
+  const safe = state && typeof state === 'object' ? state : {};
+  safe.routines = Array.isArray(safe.routines) ? safe.routines.map(r => ({
+    ...r,
+    exercises: Array.isArray(r?.exercises) ? r.exercises.map(normalizeExercise) : []
+  })) : defaultRoutines();
+  safe.history = safe.history && typeof safe.history === 'object' ? safe.history : {};
+  safe.customExercises = Array.isArray(safe.customExercises) ? safe.customExercises : [];
+  safe.session = safe.session && typeof safe.session === 'object'
+    ? {
+        ...safe.session,
+        entries: Array.isArray(safe.session.entries) ? safe.session.entries.map(entry => ({
+          ...entry,
+          setsData: Array.isArray(entry?.setsData)
+            ? entry.setsData.map(set => ({
+                weight: set?.weight ?? null,
+                reps: set?.reps ?? null,
+                done: !!set?.done
+              }))
+            : []
+        })) : []
+      }
+    : null;
+  safe.setupDone = safe.setupDone ?? true;
+  return safe;
+}
+
+function createExerciseDraft(name){
+  const base = normalizeExercise({name, sets: 3, repMin: 8, repMax: 12, linkNext: false});
+  return { ...base, setPlan: Array.from({length: base.sets}, ()=>({reps: 8, weight: null})) };
+}
+
+function syncDraftSetPlan(ex, newSetCount){
+  const count = Math.max(1, parseInt(newSetCount, 10) || 1);
+  ex.sets = count;
+  if(!Array.isArray(ex.setPlan)) ex.setPlan = [];
+  while(ex.setPlan.length < count) ex.setPlan.push({reps: ex.repMin || 8, weight: null});
+  if(ex.setPlan.length > count) ex.setPlan.length = count;
+  ex.repMin = Math.max(1, Math.min(...ex.setPlan.map(row => clampNumber(row.reps, 1, 100, ex.repMin || 1))));
+  ex.repMax = Math.max(ex.repMin, Math.max(...ex.setPlan.map(row => clampNumber(row.reps, 1, 100, ex.repMax || ex.repMin))));
+  return ex;
+}
+
 function allExercises(){return [...BUILTIN_EXERCISES, ...STATE.customExercises];}
 
 let ROUTE = { tab:"home", params:{} };
@@ -355,7 +445,16 @@ let EDIT_DRAFT = null;
 function renderRoutineEdit(){
   const id = ROUTE.params.id;
   if(!EDIT_DRAFT || EDIT_DRAFT._id !== (id||'new')){
-    if(id){const r = STATE.routines.find(x=>x.id===id); EDIT_DRAFT = JSON.parse(JSON.stringify(r)); EDIT_DRAFT._id = id;}
+    if(id){
+      const r = STATE.routines.find(x=>x.id===id);
+      if(r){
+        EDIT_DRAFT = JSON.parse(JSON.stringify(r));
+        EDIT_DRAFT.exercises = (EDIT_DRAFT.exercises || []).map(normalizeExercise);
+        EDIT_DRAFT._id = id;
+      } else {
+        EDIT_DRAFT = {id: uid(), name:"", icon:"🏋️", exercises:[], _id:'new'};
+      }
+    }
     else {EDIT_DRAFT = {id: uid(), name:"", icon:"🏋️", exercises:[], _id:'new'};}
   }
 
@@ -365,8 +464,15 @@ function renderRoutineEdit(){
     html += `<div class="empty-state" style="padding:24px 12px;"><div class="em-ic">➕</div><div class="muted">Add exercises using the search below</div></div>`;
   } else {
     EDIT_DRAFT.exercises.forEach((ex,i)=>{
+      syncDraftSetPlan(ex, ex.sets || (Array.isArray(ex.setPlan) ? ex.setPlan.length : 3));
       const isLinkedFromPrev = i>0 && EDIT_DRAFT.exercises[i-1].linkNext;
-      html += `<div class="ex-edit-row" data-ex-index="${i}">${isLinkedFromPrev ? '<div class="superset-tag">SUPERSET ↑</div>' : ''}<div class="top"><div class="exname">${i+1}. ${escapeHtml(ex.name)}</div><div style="display:flex;gap:6px;">${i>0 ? `<button class="icon-btn" data-action="move-ex" data-i="${i}" data-dir="-1" title="Move up">↑</button>`:''}${i<EDIT_DRAFT.exercises.length-1 ? `<button class="icon-btn" data-action="move-ex" data-i="${i}" data-dir="1" title="Move down">↓</button>`:''}<button class="icon-btn" data-action="remove-ex" data-i="${i}" title="Remove">✕</button></div></div><div class="controls"><label>Sets</label><input class="input" type="number" min="1" max="10" value="${ex.sets}" data-field="sets" data-i="${i}"><label>Reps</label><input class="input" type="number" min="1" max="50" value="${ex.repMin}" data-field="repMin" data-i="${i}"><span class="muted">to</span><input class="input" type="number" min="1" max="50" value="${ex.repMax}" data-field="repMax" data-i="${i}">${i<EDIT_DRAFT.exercises.length-1 ? `<button class="link-toggle ${ex.linkNext?'on':''}" data-action="toggle-link" data-i="${i}">${ex.linkNext?'🔗 Superset with next ✓':'🔗 Pair as superset'}</button>` : ''}</div></div>`;
+      const rows = ex.setPlan.map((row, si)=>`
+        <tr>
+          <td class="set-num">${si+1}</td>
+          <td><input class="input" type="number" min="1" max="100" value="${row.reps ?? ''}" data-field="plan-reps" data-i="${i}" data-set="${si}" placeholder="8"></td>
+          <td><input class="input" type="number" min="0" step="0.5" value="${row.weight ?? ''}" data-field="plan-weight" data-i="${i}" data-set="${si}" placeholder="—"></td>
+        </tr>`).join('');
+      html += `<div class="ex-edit-row" data-ex-index="${i}">${isLinkedFromPrev ? '<div class="superset-tag">SUPERSET ↑</div>' : ''}<div class="top"><div class="exname">${i+1}. ${escapeHtml(ex.name)}</div><div style="display:flex;gap:6px;">${i>0 ? `<button class="icon-btn" data-action="move-ex" data-i="${i}" data-dir="-1" title="Move up">↑</button>`:''}${i<EDIT_DRAFT.exercises.length-1 ? `<button class="icon-btn" data-action="move-ex" data-i="${i}" data-dir="1" title="Move down">↓</button>`:''}<button class="icon-btn" data-action="remove-ex" data-i="${i}" title="Remove">✕</button></div></div><div class="controls" style="margin-bottom:10px;"><label>Sets</label><input class="input" type="number" min="1" max="10" value="${ex.sets}" data-field="sets" data-i="${i}"><span class="muted">Edit reps + weight for each set below</span></div><table class="sets-table" style="margin-top:8px;"><tr><th>Set</th><th>Reps</th><th>Weight (kg)</th></tr>${rows}</table>${i<EDIT_DRAFT.exercises.length-1 ? `<div style="margin-top:10px"><button class="link-toggle ${ex.linkNext?'on':''}" data-action="toggle-link" data-i="${i}">${ex.linkNext?'🔗 Superset with next ✓':'🔗 Pair as superset'}</button></div>` : ''}</div>`;
     });
   }
 
@@ -374,7 +480,7 @@ function renderRoutineEdit(){
   html += `<button class="btn btn-primary btn-block" data-action="save-routine" style="margin-top:16px">💾 Save Routine</button>${id ? `<button class="btn btn-ghost btn-block" data-action="delete-routine" data-id="${id}" style="margin-top:10px">Delete Routine</button>`:''}<div style="height:20px"></div>`;
 
   document.getElementById('view').innerHTML = html;
-  
+
   setTimeout(() => {
     const searchEl = document.getElementById('ex-picker-search');
     if(searchEl) {
@@ -413,7 +519,7 @@ function renderSession(){
     const cardClass = (entry.linkNext || isLinkedFromPrev) ? 'session-ex-card linked' : 'session-ex-card';
     html += `<div class="${cardClass}">`;
     if(isLinkedFromPrev) html += `<div class="superset-tag">SUPERSET ↑ — alternate sets</div>`;
-    html += `<h3>${escapeHtml(entry.name)}</h3><div class="muted" style="margin-bottom:4px">Target: ${entry.repMin}-${entry.repMax} reps</div>`;
+    html += `<h3>${escapeHtml(entry.name)}</h3><div class="muted" style="margin-bottom:4px">Planned sets: ${entry.setsData.length}</div>`;
     const sug = getSuggestion(entry.name, 0, entry.repMin, entry.repMax);
     html += `<div class="suggestion"><span class="badge">+1</span><span>${sug.text}</span></div>`;
     html += `<table class="sets-table"><tr><th>Set</th><th>Weight (kg)</th><th>Reps</th><th>✓</th></tr>`;
@@ -451,12 +557,15 @@ function renderExerciseHistory(){
   const name = ROUTE.params.name;
   const hist = (STATE.history[name]||[]).slice().reverse();
   let html = `<div class="card"><h2>${escapeHtml(name)}</h2>`;
-  if(hist.length===0){html += `<div class="muted">No sessions logged yet for this exercise.</div>`;}
-  else {
+  if(hist.length===0){
+    html += `<div class="muted">No sessions logged yet for this exercise.</div>`;
+  } else {
     hist.forEach(session=>{
-      html += `<div class="hist-session"><div class="hdate">${fmtDate(session.date)}</div>`;
-      const setsStr = session.sets.map((s,i)=>`Set ${i+1}: ${s.weight}kg × ${s.reps}`).join('  ·  ');
-      html += `<div class="hsets">${setsStr}</div></div>`;
+      html += `<div class="hist-session"><div class="hdate">${fmtDate(session.date)}</div><table class="sets-table" style="margin-top:8px"><tr><th>Set</th><th>Weight</th><th>Reps</th></tr>`;
+      session.sets.forEach((s,i)=>{
+        html += `<tr><td class="set-num">${i+1}</td><td>${s.weight}kg</td><td>${s.reps}</td></tr>`;
+      });
+      html += `</table></div>`;
     });
   }
   html += `</div>`;
@@ -533,15 +642,49 @@ document.addEventListener('click', (e)=>{
     case 'move-ex': {const i = +t.dataset.i, dir = +t.dataset.dir; const arr = EDIT_DRAFT.exercises; const j = i+dir; if(j<0 || j>=arr.length) break; [arr[i],arr[j]] = [arr[j],arr[i]]; renderRoutineEdit(); break;}
     case 'remove-ex': {EDIT_DRAFT.exercises.splice(+t.dataset.i,1); renderRoutineEdit(); break;}
     case 'toggle-link': {const i = +t.dataset.i; EDIT_DRAFT.exercises[i].linkNext = !EDIT_DRAFT.exercises[i].linkNext; renderRoutineEdit(); break;}
-    case 'pick-exercise-inline': {const name = t.dataset.name; EDIT_DRAFT.exercises.push({name, sets:3, repMin:8, repMax:12, linkNext:false}); renderRoutineEdit(); break;}
-    case 'add-custom-ex-inline': {const searchEl = document.getElementById('ex-picker-search'); const name = searchEl ? searchEl.value.trim() : ''; if(!name){ showToast('Enter an exercise name'); break;} if(allExercises().some(e=>e.name.toLowerCase()===name.toLowerCase())){showToast('Exercise already exists'); break;} STATE.customExercises.push({name, cat:'Other', custom:true}); saveState(); EDIT_DRAFT.exercises.push({name, sets:3, repMin:8, repMax:12, linkNext:false}); renderRoutineEdit(); showToast('Custom exercise added!'); break;}
-    case 'save-routine': {const name = document.getElementById('routine-name').value.trim(); const icon = document.getElementById('routine-icon').value.trim() || '🏋️'; if(!name){ showToast('Please give your routine a name'); break;} if(EDIT_DRAFT.exercises.length===0){showToast('Add at least one exercise'); break;} EDIT_DRAFT.name = name; EDIT_DRAFT.icon = icon; const clean = {id: EDIT_DRAFT.id, name: EDIT_DRAFT.name, icon: EDIT_DRAFT.icon, exercises: EDIT_DRAFT.exercises.map(ex=>({name: ex.name, sets: +ex.sets, repMin: +ex.repMin, repMax: +ex.repMax, linkNext: !!ex.linkNext}))}; const idx = STATE.routines.findIndex(r=>r.id===clean.id); if(idx>=0) STATE.routines[idx] = clean; else STATE.routines.push(clean); saveState(); showToast('Routine saved!'); EDIT_DRAFT = null; goto('routines'); break;}
+    case 'pick-exercise-inline': {const name = t.dataset.name; EDIT_DRAFT.exercises.push(createExerciseDraft(name)); renderRoutineEdit(); break;}
+    case 'add-custom-ex-inline': {const searchEl = document.getElementById('ex-picker-search'); const name = searchEl ? searchEl.value.trim() : ''; if(!name){ showToast('Enter an exercise name'); break;} if(allExercises().some(e=>e.name.toLowerCase()===name.toLowerCase())){showToast('Exercise already exists'); break;} STATE.customExercises.push({name, cat:'Other', custom:true}); saveState(); EDIT_DRAFT.exercises.push(createExerciseDraft(name)); renderRoutineEdit(); showToast('Custom exercise added!'); break;}
+    case 'save-routine': {
+      const name = document.getElementById('routine-name').value.trim();
+      const icon = document.getElementById('routine-icon').value.trim() || '🏋️';
+      if(!name){ showToast('Please give your routine a name'); break;}
+      if(EDIT_DRAFT.exercises.length===0){showToast('Add at least one exercise'); break;}
+      EDIT_DRAFT.name = name;
+      EDIT_DRAFT.icon = icon;
+      const clean = {
+        id: EDIT_DRAFT.id,
+        name: EDIT_DRAFT.name,
+        icon: EDIT_DRAFT.icon,
+        exercises: EDIT_DRAFT.exercises.map(ex=>{
+          syncDraftSetPlan(ex, ex.sets || (Array.isArray(ex.setPlan) ? ex.setPlan.length : 1));
+          const reps = ex.setPlan.map(row => clampNumber(row.reps, 1, 100, ex.repMin || 8));
+          return {
+            name: ex.name,
+            sets: ex.setPlan.length,
+            repMin: Math.min(...reps),
+            repMax: Math.max(...reps),
+            linkNext: !!ex.linkNext,
+            setPlan: ex.setPlan.map(row => ({
+              reps: clampNumber(row.reps, 1, 100, ex.repMin || 8),
+              weight: row.weight === null || row.weight === undefined || row.weight === '' ? null : clampNumber(row.weight, 0, 10000, 0)
+            }))
+          };
+        })
+      };
+      const idx = STATE.routines.findIndex(r=>r.id===clean.id);
+      if(idx>=0) STATE.routines[idx] = clean; else STATE.routines.push(clean);
+      saveState();
+      showToast('Routine saved!');
+      EDIT_DRAFT = null;
+      goto('routines');
+      break;
+    }
     case 'close-modal': case 'close-modal-overlay': if(action==='close-modal-overlay' && e.target !== t) break; closeModal(); break;
     case 'modal-cat': MODAL_FILTER.cat = t.dataset.cat; renderAddExerciseModalOverlay(); break;
-    case 'pick-exercise-session': {const name = t.dataset.name; const entry = {name, repMin:8, repMax:12, linkNext:false, setsData: Array.from({length:3},()=>({weight:null, reps:null, done:false}))}; STATE.session.entries.push(entry); saveState(); closeModal(); renderSession(); break;}
+    case 'pick-exercise-session': {const name = t.dataset.name; const entry = normalizeExercise({name, sets:3, repMin:8, repMax:12, linkNext:false}); STATE.session.entries.push({name: entry.name, repMin: entry.repMin, repMax: entry.repMax, linkNext: entry.linkNext, setPlan: entry.setPlan, setsData: entry.setPlan.map(row=>({weight: row.weight, reps: row.reps, done:false}))}); saveState(); closeModal(); renderSession(); break;}
     case 'open-add-exercise-session': openAddExerciseModalForSession(); break;
     case 'toggle-done': {const ei = +t.dataset.entry, si = +t.dataset.set; const set = STATE.session.entries[ei].setsData[si]; set.done = !set.done; const entry = STATE.session.entries[ei]; if(set.done){const sug = getSuggestion(entry.name, si, entry.repMin, entry.repMax); if(set.weight===null || set.weight===undefined || set.weight==='') set.weight = sug.weight!==null?sug.weight:0; if(set.reps===null || set.reps===undefined || set.reps==='') set.reps = sug.reps;} saveState(); renderSession(); break;}
-    case 'add-set': {const ei = +t.dataset.entry; STATE.session.entries[ei].setsData.push({weight:null, reps:null, done:false}); saveState(); renderSession(); break;}
+    case 'add-set': {const ei = +t.dataset.entry; const entry = STATE.session.entries[ei]; const fallback = entry.setPlan && entry.setPlan.length ? entry.setPlan[entry.setsData.length % entry.setPlan.length] : {reps: entry.repMin || 8, weight: null}; entry.setsData.push({weight:fallback.weight, reps:fallback.reps, done:false}); saveState(); renderSession(); break;}
     case 'remove-set': {const ei = +t.dataset.entry; const arr = STATE.session.entries[ei].setsData; if(arr.length>1) arr.pop(); saveState(); renderSession(); break;}
     case 'remove-exercise-session': {const ei = +t.dataset.entry; if(confirm("Remove this exercise from today's workout?")){STATE.session.entries.splice(ei,1); saveState(); renderSession();} break;}
     case 'finish-session': finishSession(); break;
@@ -555,9 +698,28 @@ document.addEventListener('change', (e)=>{
   if(t.dataset && t.dataset.field && t.dataset.i!==undefined && ROUTE.tab==='routine-edit'){
     const i = +t.dataset.i;
     const field = t.dataset.field;
+    const ex = EDIT_DRAFT.exercises[i];
+    if(field === 'sets'){
+      syncDraftSetPlan(ex, t.value);
+      renderRoutineEdit();
+      return;
+    }
+    if(field === 'plan-reps' || field === 'plan-weight'){
+      const si = +t.dataset.set;
+      if(!Array.isArray(ex.setPlan)) ex.setPlan = [];
+      if(!ex.setPlan[si]) ex.setPlan[si] = {reps: ex.repMin || 8, weight: null};
+      if(field === 'plan-reps'){
+        ex.setPlan[si].reps = clampNumber(t.value, 1, 100, ex.repMin || 8);
+      } else {
+        const val = t.value === '' ? null : clampNumber(t.value, 0, 10000, 0);
+        ex.setPlan[si].weight = val;
+      }
+      syncDraftSetPlan(ex, ex.setPlan.length || ex.sets || 1);
+      return;
+    }
     let val = +t.value;
     if(isNaN(val) || val<1) val = 1;
-    EDIT_DRAFT.exercises[i][field] = val;
+    ex[field] = val;
   }
 });
 
@@ -581,16 +743,18 @@ document.addEventListener('input', (e)=>{
 
 /* SESSION LOGIC */
 function startSession(routine){
+  const normalizedExercises = (routine.exercises || []).map(normalizeExercise);
   STATE.session = {
     routineId: routine.id,
     routineName: routine.name,
     date: Date.now(),
-    entries: routine.exercises.map(ex=>({
+    entries: normalizedExercises.map(ex=>({
       name: ex.name,
       repMin: ex.repMin,
       repMax: ex.repMax,
       linkNext: ex.linkNext,
-      setsData: Array.from({length: ex.sets}, ()=>({weight:null, reps:null, done:false}))
+      setPlan: ex.setPlan,
+      setsData: ex.setPlan.map(row=>({weight: row.weight, reps: row.reps, done:false}))
     }))
   };
   saveState();
