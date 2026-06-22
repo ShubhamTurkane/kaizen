@@ -195,6 +195,17 @@
   @keyframes rtpulse{from{transform:translateX(-50%) scale(1);}to{transform:translateX(-50%) scale(1.06);}}
   .rest-timer .rt-btn{background:rgba(255,255,255,0.18);color:#fff;border:none;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Sora',sans-serif;}
   .rest-timer .rt-btn:active{transform:scale(0.95);}
+
+  /* ===== CHATBOT UI ===== */
+  .chat-view { display: flex; flex-direction: column; height: calc(100vh - 180px); }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 4px 0 12px; display: flex; flex-direction: column; gap: 12px; }
+  .chat-bubble { max-width: 82%; padding: 10px 14px; border-radius: 16px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; box-shadow: var(--shadow-sm); }
+  .chat-bubble.user { background: var(--plum); color: var(--white); align-self: flex-end; border-bottom-right-radius: 4px; }
+  .chat-bubble.bot { background: var(--white); color: var(--ink); align-self: flex-start; border-bottom-left-radius: 4px; }
+  .chat-bubble.typing { background: var(--white); color: var(--grey); font-style: italic; }
+  .chat-input-area { display: flex; gap: 8px; padding: 12px 0 4px; border-top: 1px solid var(--lavender-mid); background: var(--lavender-soft); }
+  .chat-input-area input { flex: 1; }
+  .chat-send-btn { width: 46px; height: 46px; padding: 0; font-size: 18px; flex: 0 0 auto; }
 </style>
 </head>
 <body>
@@ -355,7 +366,6 @@ function normalizeExercise(ex){
 
 function normalizeLoadedState(state){
   const safe = state && typeof state === 'object' ? state : {};
-  // Ensure every routine has an ID to prevent Start button issues
   safe.routines = Array.isArray(safe.routines) ? safe.routines.map(r => ({
     ...r,
     id: r.id || uid(),
@@ -382,6 +392,13 @@ function normalizeLoadedState(state){
       }
     : null;
   safe.setupDone = safe.setupDone ?? true;
+  
+  // Initialize Chat History
+  if(!Array.isArray(safe.chatHistory) || safe.chatHistory.length === 0) {
+    safe.chatHistory = [
+      { role: 'system', content: 'You are Kaizen, an expert AI fitness coach specializing in progressive overload, weightlifting form, and workout routines. Keep answers concise, actionable, and highly encouraging.' }
+    ];
+  }
   return safe;
 }
 
@@ -412,7 +429,7 @@ function exerciseEmoji(name){
 let ROUTE = { tab:"home", params:{} };
 let sessionTimerInterval = null;
 let restTimer = null; // { endsAt, interval }
-const TABS = [{id:"home", label:"Home", ic:"🏠"},{id:"routines", label:"Routines", ic:"📋"},{id:"progress", label:"Progress", ic:"📈"}];
+const TABS = [{id:"home", label:"Home", ic:"🏠"},{id:"routines", label:"Routines", ic:"📋"},{id:"progress", label:"Progress", ic:"📈"},{id:"coach", label:"Coach", ic:"🤖"}];
 
 function goto(tab, params={}){
   ROUTE = {tab, params};
@@ -627,7 +644,7 @@ function renderHeader(){
     bar.innerHTML = `<div class="toprow"><button class="back-btn" data-action="goto" data-tab="progress">←</button><span class="screen-title">${escapeHtml(ROUTE.params.name)}</span><span style="width:34px"></span></div>`;
     return;
   }
-  const titles = {routines:"Your Routines", progress:"Progress"};
+  const titles = {routines:"Your Routines", progress:"Progress", coach:"AI Coach"};
   bar.innerHTML = `<div class="toprow"><span class="screen-title">${titles[ROUTE.tab] || ''}</span></div>`;
 }
 
@@ -663,7 +680,6 @@ function renderHome(){
     html += `<div class="section-title">Start a Workout</div>`;
     STATE.routines.forEach(r=>{
       const lastDate = lastRoutineDate(r);
-      // FIX: Entire card is clickable to start the session
       html += `<div class="routine-card" data-action="start-session" data-id="${r.id}">
                 <div class="rname">${r.icon||'🏋️'} ${escapeHtml(r.name)}</div>
                 <div class="rmeta">${r.exercises.length} exercise${r.exercises.length===1?'':'s'} ${lastDate ? '· last done '+fmtDate(lastDate) : '· not started yet'}</div>
@@ -693,7 +709,6 @@ function renderRoutines(){
     html += `<div class="empty-state"><div class="em-ic">📋</div><div class="em-title">No splits yet</div><div class="muted">Build routines like Push, Pull, Legs, Abs — or anything custom.</div></div>`;
   } else {
     STATE.routines.forEach(r=>{
-      // FIX: Entire card is clickable to start the session
       html += `<div class="routine-card" data-action="start-session" data-id="${r.id}">
                 <div class="rname">${r.icon||'🏋️'} ${escapeHtml(r.name)}</div>
                 <div class="rmeta">${r.exercises.map(e=>`${exerciseEmoji(e.name)} ${escapeHtml(e.name)}`).join(', ')}</div>
@@ -858,6 +873,123 @@ function renderExerciseHistory(){
   document.getElementById('view').innerHTML = html;
 }
 
+/* ===== RENDER: AI COACH CHAT ===== */
+const OPENROUTER_API_KEY = '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'; // <--- PASTE YOUR OPENROUTER API KEY HERE
+const OPENROUTER_MODEL = 'nvidia/llama-nemotron-rerank-vl-1b-v2:free'; // Verify exact model slug on openrouter.ai
+
+function renderCoach() {
+  let html = `<div class="chat-view">
+    <div class="chat-messages" id="chat-messages">`;
+    
+  if (STATE.chatHistory.length <= 1) {
+    html += `<div class="empty-state" style="margin:auto;">
+                <div class="em-ic">🤖</div>
+                <div class="em-title">Meet your AI Coach</div>
+                <div class="muted">Ask about progressive overload, form fixes, or how to break through a plateau.</div>
+              </div>`;
+  } else {
+    STATE.chatHistory.forEach(msg => {
+      if (msg.role === 'user') {
+        html += `<div class="chat-bubble user">${escapeHtml(msg.content)}</div>`;
+      } else if (msg.role === 'assistant') {
+        html += `<div class="chat-bubble bot">${escapeHtml(msg.content)}</div>`;
+      }
+    });
+  }
+  
+  html += `</div>
+    <div class="chat-input-area">
+      <input type="text" id="chat-input" class="input" placeholder="Ask your coach..." autocomplete="off">
+      <button class="btn btn-glow-primary chat-send-btn" id="send-chat-btn">➤</button>
+    </div>
+  </div>`;
+  
+  document.getElementById('view').innerHTML = html;
+  
+  // Add event listeners
+  const sendBtn = document.getElementById('send-chat-btn');
+  const input = document.getElementById('chat-input');
+  const messagesEl = document.getElementById('chat-messages');
+  
+  // Scroll to bottom
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  
+  sendBtn.addEventListener('click', handleSendChat);
+  input.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleSendChat();
+  });
+}
+
+async function handleSendChat() {
+  const input = document.getElementById('chat-input');
+  const messagesEl = document.getElementById('chat-messages');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+
+  // 1. Add user message to state and UI
+  STATE.chatHistory.push({ role: 'user', content: prompt });
+  saveState();
+
+  // Render user bubble
+  const userBubble = document.createElement('div');
+  userBubble.className = 'chat-bubble user';
+  userBubble.textContent = prompt;
+  messagesEl.appendChild(userBubble);
+
+  // Clear input
+  input.value = '';
+  input.disabled = true;
+  
+  // Scroll down
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  // 2. Add typing indicator
+  const typingBubble = document.createElement('div');
+  typingBubble.className = 'chat-bubble bot typing';
+  typingBubble.textContent = 'Thinking...';
+  messagesEl.appendChild(typingBubble);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  try {
+    // 3. Fetch from OpenRouter
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: STATE.chatHistory
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const botReply = data.choices[0].message.content;
+
+    // 4. Add bot message to state and UI
+    STATE.chatHistory.push({ role: 'assistant', content: botReply });
+    saveState();
+
+    typingBubble.classList.remove('typing');
+    typingBubble.textContent = botReply;
+
+  } catch (error) {
+    console.error("Chat Error:", error);
+    typingBubble.classList.remove('typing');
+    typingBubble.style.color = "var(--danger)";
+    typingBubble.textContent = "⚠️ Connection error. Check your API key or network.";
+  } finally {
+    input.disabled = false;
+    input.focus();
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+}
+
 /* MAIN RENDER */
 function render(){
   if(ROUTE.tab!=='session'){ stopSessionClock(); stopRestTimer(); }
@@ -867,6 +999,7 @@ function render(){
     case 'home': renderHome(); break;
     case 'routines': renderRoutines(); break;
     case 'progress': renderProgress(); break;
+    case 'coach': renderCoach(); break; // <-- ADDED COACH ROUTE
     case 'routine-edit': renderRoutineEdit(); break;
     case 'session': renderSession(); break;
     case 'exercise-history': renderExerciseHistory(); break;
@@ -1004,7 +1137,6 @@ document.addEventListener('click', (e)=>{
         const sug = getSuggestion(entry.name, si, entry.repMin, entry.repMax);
         if(set.weight===null || set.weight===undefined || set.weight==='') set.weight = sug.weight!==null?sug.weight:0;
         if(set.reps===null || set.reps===undefined || set.reps==='') set.reps = sug.reps;
-        // Start rest timer when marking done
         startRestTimer(REST_DEFAULT_SEC);
       }
       saveState();
@@ -1081,7 +1213,6 @@ document.addEventListener('input', (e)=>{
     const val = t.value === '' ? null : parseFloat(t.value);
     STATE.session.entries[ei].setsData[si][field] = val;
     saveState();
-    // Live-update PR badge without full re-render (avoid losing focus)
     if(field === 'weight' || field === 'reps'){
       const td = t.closest('td');
       if(td){
@@ -1143,18 +1274,14 @@ function finishSession(){
 
     if(loggedSets.length === 0) return;
 
-    // Detect PRs BEFORE pushing to history
     loggedSets.forEach(set => {
       if(isPR(entry.name, set.weight, set.reps)) newPRCount++;
     });
 
-    // Save to history
     if(!STATE.history[entry.name]) STATE.history[entry.name] = [];
     STATE.history[entry.name].push({date: s.date, sets: loggedSets});
     if(STATE.history[entry.name].length > 50) STATE.history[entry.name].shift();
 
-    // *** FIX: Persist the just-logged sets back to the routine template ***
-    // so the next session starts from these working numbers.
     if(routine){
       const routineIdx = routine.exercises.findIndex(e => e.name === entry.name);
       if(routineIdx >= 0){
